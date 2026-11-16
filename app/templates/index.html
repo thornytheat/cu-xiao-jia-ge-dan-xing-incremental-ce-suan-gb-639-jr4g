@@ -126,7 +126,7 @@
   <div class="table-wrap">
     <table class="grid">
       <thead>
-        <tr><th>批次号</th><th>样例集</th><th>状态</th><th>创建时间</th><th>批次键</th></tr>
+        <tr><th>批次号</th><th>样例集</th><th>状态</th><th>报告版本</th><th>创建时间</th><th>批次键</th></tr>
       </thead>
       <tbody>
         {% for item in batches %}
@@ -134,6 +134,9 @@
           <td><a href="/?batch_id={{ item.batch_id }}">{{ item.batch_id }}</a></td>
           <td>{{ item.dataset }}</td>
           <td><span class="tag {{ 'tag-ok' if item.status == 'done' else 'tag-warn' }}">{{ item.status | status }}</span></td>
+          <td>
+            {% if item.report_version %}v{{ item.report_version.version_no }} · {{ item.report_version.state | vstate }}{% if item.report_version.is_current %} · 当前{% endif %}{% else %}—{% endif %}
+          </td>
           <td>{{ item.created_at | shortdt }}</td>
           <td title="{{ item.batch_key }}">{{ item.batch_key[:12] }}</td>
         </tr>

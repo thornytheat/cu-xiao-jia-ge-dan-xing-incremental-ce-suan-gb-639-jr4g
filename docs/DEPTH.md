@@ -1,10 +1,11 @@
 # 深度登记 pricelift（促销价格弹性与增量测算）
 
-- 规模：中型（7 个功能模块 / 7 个页面 / 80 个文件 / 90 条测试 / 18 条陷阱）
+- 规模：中型（7 个功能模块 / 7 个页面 / 84 个文件 / 112 条测试 / 19 条陷阱）
 - 核心规则一：**对数线性弹性**——`ln q = a + b·ln p` 用最小二乘估计，先对 x 与 y 双中心化再求比值（漏掉中心化斜率会变正）；0 销量默认按 `ln(q+0.5)` 统一平移，可切到剔除；输出斜率、标准误、t 值与 R²，`|t| < 1.96` 记为不显著。
 - 核心规则二：**增量测算与区间**——基线 = 促销前 14 天日均 × 促销有效天数 × 对照组同期倍数；增量 = 实际 − 基线（Decimal，2 位）；区间宽度用弹性斜率的 delta 法给出，斜率标准误为 0 时区间收成一点。
 - 核心规则三：**实验设计**——统计单位是「一天一条日销售额」；`k = z(1−α/2) + z(功效)`，`最小实验期 n = (A² + sqrt(A⁴ + 4·A²·m))/2`（`A = k·cv/目标效应`，`m = 14` 天基线窗）；方差用 HC1 稳健标准误与朴素标准误的比值放大；缺日必须按三种补法各算一遍，结论不一致就标出来。
-- 使用者与工作流：牧原乳品区域销售部 6 人，每周十余个促销，增量靠经验拍。现在导入日销与促销日历即可得到「弹性 + 增量 + 区间 + 五账」，再按下一期目标效应算实验期、对照与预期区间，每条结论都能追到行号与原因码。
+- 核心规则四：**促销单快照与报告版本**——每次测算把当次促销日历规范化（与书写顺序/首尾空白无关）后固化为不可变快照并算 sha256 摘要，批次绑定快照；同一业务口径下促销补录/改价生成递增报告版本，待核版本不覆盖当前报告，核对通过才原子切换，旧版按原快照永久可导出；同补录重试靠幂等键命中同一版本，中断可恢复、失败保旧版。
+- 使用者与工作流：牧原乳品区域销售部 6 人，每周十余个促销，增量靠经验拍。现在导入日销与促销日历即可得到「弹性 + 增量 + 区间 + 五账」，再按下一期目标效应算实验期、对照与预期区间，每条结论都能追到行号与原因码；促销补录改价时历史报告不再被改写。
 
 ## 功能模块
 
@@ -15,7 +16,7 @@
 | M3 质量隔离 | 看严重度分布与隔离行，导出隔离 CSV | GET /api/quarantine、GET /api/quarantine.csv、页面 /quarantine | `app/modules/m3_quality/rules.py` `app/modules/m3_quality/quarantine.py` `app/modules/m3_quality/metrics.py` | `tests/test_quality.py` |
 | M4 弹性 | 看每个商品与每个渠道的弹性、标准误、R²、显著性 | GET /api/elasticity、页面 /elasticity | `app/modules/m4_elastic/prepare.py` `app/modules/m4_elastic/ols.py` `app/modules/m4_elastic/fit.py` | `tests/test_elasticity.py` |
 | M5 增量与批次 | 触发增量测算、看区间与渠道分摊、查批次历史与幂等重跑 | POST /api/lift、GET /api/batches、页面 /lift | `app/modules/m5_lift/baseline.py` `app/modules/m5_lift/ci.py` `app/modules/m5_lift/spread.py` `app/modules/m5_lift/service.py` | `tests/test_lift.py` |
-| M6 报告导出 | 核对五账，导出增量/弹性/五账/运行清单 | GET /api/report、GET /api/export、页面 /report | `app/modules/m6_report/csv_out.py` `app/modules/m6_report/manifest_out.py` `app/modules/m6_report/service.py` | `tests/test_report.py` |
+| M6 报告导出 | 核对五账，导出增量/弹性/五账/运行清单，报告版本核对切换 | GET /api/report、GET /api/export、GET /api/report-versions、POST /api/report-versions/{id}/approve、页面 /report | `app/modules/m6_report/csv_out.py` `app/modules/m6_report/manifest_out.py` `app/modules/m6_report/service.py` `app/modules/m2_price/snapshot.py` `app/store.py` | `tests/test_report.py` `tests/test_report_versions.py` `tests/test_report_versions_api.py` |
 | M7 实验设计 | 给目标效应与功效，算最小实验期、预算下可识别效应、对照建议与预期区间 | POST /api/design、GET /api/design、页面 /design | `app/modules/m7_design/power.py` `app/modules/m7_design/robust.py` `app/modules/m7_design/impute.py` `app/modules/m7_design/control.py` `app/modules/m7_design/service.py` | `tests/test_design.py` `tests/test_design_api.py` |
 
 端到端：`tests/test_e2e.py`（真实样例 → 隔离 → 弹性 → 增量 → 报告 → 设计 → 导出，含 422 失败输入与幂等重跑）。
@@ -42,6 +43,9 @@
 | TRAP-25 | 两版活动价的区间重叠 | 取到哪版看运气，重叠日重复计天数 | 重叠天数显式标出（`Q_PROMO_OVERLAP`），按版本号大者生效 | `app/modules/m2_price/versions.py` | `tests/test_price.py::test_version_overlap_marked_and_highest_wins` |
 | TRAP-27 | 促销期内缺 1-2 天，缺日按 0 补 | 日均被压低、波动被放大，预期区间从「不含 0」翻成「含 0」 | 三种补法（丢弃 / 按 0 / 按均值）各算一遍，区间含 0 或所需天数极差超 10% 就记 `D_IMPUTE_SENSITIVE` 并逐行给出数值 | `app/modules/m7_design/impute.py` | `tests/test_design.py::test_impute_sensitivity_flips_on_light_missing` |
 | TRAP-28 | 候选对照在实验期内自己也在促销 | 同期倍数把它自己的促销算进基线，增量被抵掉 | 先按实验期（左闭右开）判重叠，有重叠直接标 `排除`（`D_CONTROL_OVERLAP`），只从「可用」里选对照 | `app/modules/m7_design/control.py` | `tests/test_design.py::test_control_excludes_candidate_with_promo_in_experiment_window` |
+| TRAP-29 | 促销补录/改价后重算，历史报告在原记录上被改写 | 一改日历，已发布报告的增量与区间全变，无法复核也无法追责 | 每次测算固化当次促销单不可变快照（规范化行集合 + sha256），批次绑定快照；补录生成新报告版本，旧版本按原快照永久保留，显式带 batch_id 导出的仍是旧结论 | `app/modules/m2_price/snapshot.py` `app/store.py` `app/modules/m5_lift/service.py` | `tests/test_report_versions.py::test_changing_calendar_does_not_rewrite_history` `tests/test_report_versions.py::test_old_version_still_exports_its_own_snapshot_after_switch` |
+| TRAP-30 | 补录请求重试/生成中断，要么重复造版本要么丢核对进度 | 每次点击都新增一个版本号；或中断后半成品卡死、旧报告被半成品顶掉 | 幂等键 = 业务口径 + 促销快照摘要 + 全量输入摘要，同补录重试命中同一版本记录（DB UNIQUE 兜底）；中断保留 `running` 原地恢复、普通失败标 `failed` 且旧 current 不变，待核版核对通过才原子切换 current | `app/modules/m5_lift/service.py` `app/store.py` | `tests/test_report_versions.py::test_interrupted_generation_resumes_same_version` `tests/test_report_versions.py::test_same_backfill_retry_adds_no_version` `tests/test_report_versions.py::test_failed_generation_keeps_old_current` |
+| TRAP-31 | 多版本并存时把更旧的待核版切成当前报告 | 旧报告反向覆盖更新的核准结论，当前报告回退 | 发布前检查同系列是否存在更新的待核/已发布版本，存在即拒绝（409），保证当前报告始终是最新核准版 | `app/store.py::publish_version` | `tests/test_report_versions.py::test_cannot_approve_older_pending_when_newer_pending_exists` `tests/test_report_versions_api.py::test_older_pending_cannot_override_newer_report` |
 
 ## 对账规则
 
@@ -66,6 +70,7 @@
 - 反例（朴素实现会挂）：`tests/test_elasticity.py::test_naive_uncentered_slope_differs`（漏掉中心化，斜率从 -0.79 变成 +1.99）、`tests/test_price.py::test_naive_float_parse_would_raise`、`tests/test_ingest.py::test_naive_splitlines_breaks_record_count`、`tests/test_design.py::test_hc1_ratio_and_variance_factor_on_heteroskedastic_series`（按朴素标准误算 14 天，按稳健标准误要 20 天）、`tests/test_lift.py::test_baseline_blocks_when_control_mapping_missing`（没有映射就当倍数 1.0，品类走势被吞掉）。
 - 边界：`tests/test_lift.py::test_baseline_blocks_when_control_mapping_missing`、`tests/test_price.py::test_zero_length_promo_range_rejected`（区间长度 0 必须拒绝）、`tests/test_quality.py::test_coverage_gate_is_inclusive_at_threshold`（占比正好等于门槛仍进测算）、`tests/test_design.py::test_control_excludes_candidate_with_promo_in_experiment_window`（对照促销结束日正好等于实验开始日不算重叠）。
 - 不变量：`tests/test_lift.py::test_idempotent_rerun_adds_no_rows`（幂等重跑行数不变）、`tests/test_lift.py::test_interval_collapses_when_standard_error_is_zero`（区间收点）、`tests/test_quality.py::test_day_account_identity_holds`（天数账守恒）、`tests/test_lift.py::test_allocate_keeps_total_for_real_promotions`（分摊守恒）、`tests/test_report.py::test_reconcile_stays_balanced_under_drop_mode`（换 0 销量处理方式后五账仍平）、`tests/test_design.py::test_interval_contains_zero_when_power_is_low`（功效低于一半时区间必含 0）、`tests/test_design.py::test_design_window_is_half_open`（实验窗左闭右开）。
+- 报告版本不变量（`tests/test_report_versions.py`、`tests/test_report_versions_api.py`）：首版即当前报告；补录生成待核新版且旧版仍 current；同补录重试版本数不增；中断恢复同一条版本、attempts 递增；失败旧 current 不变；旧版按各自快照导出；同一时刻至多一个 current；旧待核版不能反向覆盖更新报告。
 - 端到端：`tests/test_e2e.py::test_full_pipeline_end_to_end`。
 
 ## 已知不覆盖

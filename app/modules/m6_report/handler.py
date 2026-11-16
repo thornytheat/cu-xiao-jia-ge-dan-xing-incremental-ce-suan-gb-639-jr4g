@@ -27,6 +27,16 @@ def api_report(request: Request) -> dict:
                 "lift": [], "distribution": []}
     payload = service.report_payload(ctx.store, batch_id)
     payload["manifest"] = ctx.store.manifest(batch_id)
+    version = ctx.store.get_version_by_batch(batch_id)
+    payload["report_version"] = version
+    if version is not None:
+        snap = ctx.store.get_promo_snapshot(version["snapshot_id"])
+        payload["snapshot"] = (
+            {"snapshot_digest": snap["snapshot_digest"], "source_name": snap["source_name"],
+             "source_sha256": snap["source_sha256"], "row_count": snap["row_count"]}
+            if snap else None)
+    else:
+        payload["snapshot"] = None
     return payload
 
 
@@ -58,8 +68,21 @@ def page_report(request: Request):
     batch_id = _batch_id(request)
     if batch_id is None:
         return web.render(request, "report.html", payload=None, kinds=KINDS,
-                          money_unit=config.MONEY_UNIT, qty_unit=config.QTY_UNIT)
+                          money_unit=config.MONEY_UNIT, qty_unit=config.QTY_UNIT,
+                          report_versions=[], current_version=None)
     payload = service.report_payload(ctx.store, batch_id)
+    current_version = ctx.store.get_version_by_batch(batch_id)
+    snapshot = None
+    if current_version is not None:
+        snap = ctx.store.get_promo_snapshot(current_version["snapshot_id"])
+        if snap is not None:
+            snapshot = {
+                "snapshot_digest": snap["snapshot_digest"],
+                "source_name": snap["source_name"],
+                "source_sha256": snap["source_sha256"],
+                "row_count": snap["row_count"],
+                "created_at": snap["created_at"],
+            }
     return web.render(
         request, "report.html",
         payload=payload,
@@ -67,4 +90,8 @@ def page_report(request: Request):
         manifest=ctx.store.manifest(batch_id),
         money_unit=config.MONEY_UNIT,
         qty_unit=config.QTY_UNIT,
+        current_version=current_version,
+        snapshot=snapshot,
+        report_versions=ctx.store.list_versions(
+            current_version["series_key"] if current_version else None),
     )

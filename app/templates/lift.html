@@ -145,14 +145,14 @@
 
 <section class="section">
   <div class="section-head">
-    <h2 class="section-title">批次</h2>
-    <p class="section-figure">{{ batches | length }} 次</p>
+    <h2 class="section-title">批次与报告版本</h2>
+    <p class="section-figure">{{ batches | length }} 次 · 同一口径补录生成新版本，旧版保留</p>
   </div>
   {% if batches %}
   <div class="table-wrap">
     <table class="grid">
       <thead>
-        <tr><th>批次号</th><th>样例集</th><th>状态</th><th>创建时间</th></tr>
+        <tr><th>批次号</th><th>样例集</th><th>状态</th><th>报告版本</th><th>促销快照</th><th>创建时间</th></tr>
       </thead>
       <tbody>
         {% for item in batches %}
@@ -160,6 +160,13 @@
           <td><a href="/lift?batch_id={{ item.batch_id }}">{{ item.batch_id }}</a></td>
           <td>{{ item.dataset }}</td>
           <td>{{ item.status | status }}</td>
+          <td>
+            {% if item.report_version %}
+            v{{ item.report_version.version_no }} ·
+            <span class="tag {{ 'tag-ok' if item.report_version.state == 'published' else ('tag-warn' if item.report_version.state == 'pending' else ('tag-error' if item.report_version.state == 'failed' else 'tag-info')) }}{% if item.report_version.is_current %} tag-ok{% endif %}">{{ item.report_version.state | vstate }}</span>
+            {% else %}—{% endif %}
+          </td>
+          <td title="{{ item.snapshot_id }}">{{ item.snapshot_id[:12] if item.snapshot_id else "—" }}</td>
           <td>{{ item.created_at | shortdt }}</td>
         </tr>
         {% endfor %}

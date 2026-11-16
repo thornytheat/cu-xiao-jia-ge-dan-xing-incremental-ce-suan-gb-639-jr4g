@@ -39,12 +39,61 @@
     </p>
   </dl>
   <div class="actions">
-    <a class="btn" href="/api/export?kind=lift">导出增量</a>
-    <a class="btn btn-ghost" href="/api/export?kind=reconcile">导出账目</a>
-    <a class="btn btn-ghost" href="/api/export?kind=elastic">导出弹性</a>
-    <a class="btn btn-ghost" href="/api/export?kind=manifest&amp;fmt=json">导出清单</a>
+    <a class="btn" href="/api/export?kind=lift{% if batch %}&batch_id={{ batch.batch_id }}{% endif %}">导出增量</a>
+    <a class="btn btn-ghost" href="/api/export?kind=reconcile{% if batch %}&batch_id={{ batch.batch_id }}{% endif %}">导出账目</a>
+    <a class="btn btn-ghost" href="/api/export?kind=elastic{% if batch %}&batch_id={{ batch.batch_id }}{% endif %}">导出弹性</a>
+    <a class="btn btn-ghost" href="/api/export?kind=manifest&amp;fmt=json{% if batch %}&batch_id={{ batch.batch_id }}{% endif %}">导出清单</a>
     <a class="btn btn-ghost" href="/quarantine">看隔离区</a>
   </div>
+</section>
+
+<section class="section">
+  <div class="section-head">
+    <h2 class="section-title">报告版本与促销单快照</h2>
+    <p class="section-figure">
+      {% if current_version %}v{{ current_version.version_no }} · {{ current_version.state | vstate }}{% else %}无版本记录{% endif %}
+    </p>
+  </div>
+  {% if snapshot %}
+  <ul class="rulelist">
+    <li><dt>绑定快照</dt><dd title="{{ snapshot.snapshot_digest }}">{{ snapshot.snapshot_digest[:16] }}… · 来源 {{ snapshot.source_name }} · {{ snapshot.row_count }} 行</dd></li>
+    <li><dt>促销单原文摘要</dt><dd>{{ snapshot.source_sha256[:24] }}…</dd></li>
+    <li><dt>快照时间</dt><dd>{{ snapshot.created_at | shortdt }}</dd></li>
+  </ul>
+  {% endif %}
+  {% if report_versions %}
+  <div class="table-wrap">
+    <table class="grid">
+      <thead>
+        <tr><th class="num">版本</th><th>批次号</th><th>状态</th><th>促销快照</th><th>说明</th><th class="num">重试</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+        {% for v in report_versions %}
+        <tr>
+          <td class="num">v{{ v.version_no }}{% if v.is_current %} <span class="tag tag-ok">当前</span>{% endif %}</td>
+          <td><a href="/report?batch_id={{ v.batch_id }}">{{ v.batch_id }}</a></td>
+          <td><span class="tag {{ 'tag-ok' if v.state == 'published' else ('tag-warn' if v.state == 'pending' else ('tag-error' if v.state == 'failed' else 'tag-info')) }}">{{ v.state | vstate }}</span></td>
+          <td title="{{ v.snapshot_id }}">{{ v.snapshot_id[:12] }}</td>
+          <td class="trunc" title="{{ v.change_note }}{% if v.error_note %}｜{{ v.error_note }}{% endif %}">{{ v.change_note }}{% if v.error_note %} <br><small class="is-neg">{{ v.error_note }}</small>{% endif %}</td>
+          <td class="num">{{ v.attempts }}</td>
+          <td>
+            {% if v.state == 'pending' %}
+            <button class="btn btn-ghost js-approve" data-version-id="{{ v.version_id }}" type="button">核对通过，切换为当前报告</button>
+            {% elif v.state == 'failed' %}
+            <span class="tag tag-error">保留旧版，可重试补录</span>
+            {% else %}
+            <a class="btn btn-ghost" href="/report?batch_id={{ v.batch_id }}">查看</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="form-note">旧版本始终按各自绑定的促销单快照导出；待核版本核对通过后才会切换为当前报告。</p>
+  {% else %}
+  <p class="empty">还没有报告版本。</p>
+  {% endif %}
 </section>
 
 <section class="section">

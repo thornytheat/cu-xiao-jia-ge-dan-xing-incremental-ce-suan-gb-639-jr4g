@@ -46,6 +46,10 @@ def api_import(body: ImportIn, request: Request) -> dict:
         "dataset": batch["dataset"],
         "counters": result["counters"],
         "note": result["note"],
+        "report_version": result.get("report_version"),
+        "version_state": result.get("version_state"),
+        "snapshot": result.get("snapshot"),
+        "resumed": result.get("resumed", False),
     }
 
 
@@ -68,11 +72,16 @@ def page_index(request: Request):
     ctx = web.get_ctx(request)
     batch = ctx.current_batch(request.query_params.get("batch_id"))
     batch_id = batch["batch_id"] if batch else None
+    batches = []
+    for item in ctx.store.list_batches(10):
+        enriched = dict(item)
+        enriched["report_version"] = ctx.store.get_version_by_batch(item["batch_id"])
+        batches.append(enriched)
     return web.render(
         request, "index.html",
         sources=ctx.store.sources(batch_id) if batch_id else [],
         totals=ctx.store.totals(batch_id) if batch_id else {},
-        batches=ctx.store.list_batches(10),
+        batches=batches,
         datasets=service.describe(ctx.settings),
         state_labels=service.STATE_LABELS,
     )

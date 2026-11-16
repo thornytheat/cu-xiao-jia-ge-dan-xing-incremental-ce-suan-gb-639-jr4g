@@ -123,4 +123,42 @@
     }
     window.location.href = url.toString();
   });
+
+  // 报告版本核对：切换当前报告（旧版本按原快照归档保留）
+  document.addEventListener("click", function (event) {
+    var button = event.target;
+    if (!button.matches(".js-approve")) {
+      return;
+    }
+    var versionId = button.getAttribute("data-version-id");
+    button.disabled = true;
+    button.textContent = "切换中…";
+    fetch("/api/report-versions/" + versionId + "/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    })
+      .then(function (response) {
+        return response.json().then(function (body) {
+          return { ok: response.ok, body: body };
+        });
+      })
+      .then(function (result) {
+        if (!result.ok) {
+          button.disabled = false;
+          button.textContent = "核对通过，切换为当前报告";
+          window.alert(result.body.message || "切换失败");
+          return;
+        }
+        // 切换成功后落到新当前报告
+        var target = result.body.batch_id;
+        var url = new URL(window.location.href);
+        url.searchParams.set("batch_id", target);
+        window.location.href = url.toString();
+      })
+      .catch(function (error) {
+        button.disabled = false;
+        button.textContent = "核对通过，切换为当前报告";
+        window.alert("网络不可用 · " + error.message);
+      });
+  });
 })();

@@ -99,6 +99,23 @@
 `run_id`（`PL-时间戳-随机`）、`batch_key`（样例集 + 0 销量方式 + 规则版本 + 三份输入
 sha256 的摘要）、`input_digest`（三份输入 sha256 的摘要）、`rule_version`、
 `elapsed_ms`、各阶段进/出/隔离计数。同 `batch_key` 重跑复用已有批次，不新增行。
+清单另含 `promo_snapshot`：当次促销单快照 id/摘要、来源文件名与行数，用来证明该批次
+用的是哪一版促销单；CSV 清单以 `promo_snapshot_id`、`promo_snapshot_digest`、
+`promo_source` 三行输出。
+
+## 9.1 促销单快照与报告版本
+
+- `promo_snapshots`：`snapshot_id`（= 规范化内容的 sha256 摘要，同促销单幂等不重复）、
+  来源文件 sha256、行数、规范化后的逐行 JSON（字段顺序固定、行集合排序后再摘要，
+  与书写顺序和首尾空白无关）。快照只增不改。
+- `batches.snapshot_id`：每个批次绑定一份促销单快照；批次数据整体不可变，改日历只影响
+  后续新批次。
+- `report_versions`：同一业务口径 `series_key`（样例集 + 0 销量方式 + 规则版本）下的
+  递增版本。字段：`version_no`、`batch_id`、`snapshot_id`、`idem_key`（口径 + 促销快照
+  摘要 + 全量输入摘要，UNIQUE）、`state`（running/pending/published/archived/failed）、
+  `is_current`、`attempts`、`error_note`。同一时刻一个 series 至多一个 `is_current=1`；
+  首版直接 published，补录版先 pending，核对通过原子切换并把旧 current 置 archived；
+  存在更新的待核/已发布版本时，拒绝发布更旧的待核版。
 
 ## 10 实验设计
 

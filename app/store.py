@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS batches (
     finished_at TEXT,
     input_digest TEXT NOT NULL,
     params_json TEXT NOT NULL DEFAULT '{}',
-    note TEXT NOT NULL DEFAULT ''
+    note TEXT NOT NULL DEFAULT '',
+    snapshot_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_batches_key ON batches(batch_key, status);
 
@@ -101,7 +102,43 @@ CREATE TABLE IF NOT EXISTS totals (
 CREATE TABLE IF NOT EXISTS manifests (
     batch_id TEXT PRIMARY KEY, json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS promo_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    snapshot_digest TEXT NOT NULL UNIQUE,
+    source_name TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    row_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    content_json TEXT NOT NULL
+);
+
+-- 报告版本：同一业务口径（样例集 + 0 销量处理 + 规则版本）下，促销单补录/改价
+-- 生成新版本供核对；旧版本保留原快照与原批次，切换只动 current 指针。
+CREATE TABLE IF NOT EXISTS report_versions (
+    version_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_key TEXT NOT NULL,
+    version_no INTEGER NOT NULL,
+    batch_id TEXT NOT NULL UNIQUE,
+    snapshot_id TEXT NOT NULL,
+    idem_key TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL,
+    is_current INTEGER NOT NULL DEFAULT 0,
+    change_note TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 1,
+    error_note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (series_key, version_no)
+);
+CREATE INDEX IF NOT EXISTS idx_report_series ON report_versions(series_key, state);
+CREATE INDEX IF NOT EXISTS idx_report_current ON report_versions(is_current, state);
 """
+
+# 旧库补列：新库建表时直接带上 snapshot_id；老库通过 ALTER 幂等补齐。
+_LEGACY_MIGRATIONS = (
+    "ALTER TABLE batches ADD COLUMN snapshot_id TEXT NOT NULL DEFAULT ''",
+)
 
 BATCH_TABLES = (
     "sources", "sales", "promos", "promo_windows", "quarantine",
@@ -115,6 +152,15 @@ class Store:
         Path(self.path).resolve().parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn) -> None:
+        """老库幂等补列：列已存在时忽略 OperationalError。"""
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(batches)")}
+        for statement in _LEGACY_MIGRATIONS:
+            column = statement.split("ADD COLUMN", 1)[1].strip().split()[0]
+            if column not in existing:
+                conn.execute(statement)
 
     @contextmanager
     def connect(self):
@@ -134,17 +180,19 @@ class Store:
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO batches (batch_id, batch_key, run_id, dataset, status,
-                        created_at, finished_at, input_digest, params_json, note)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                        created_at, finished_at, input_digest, params_json, note,
+                        snapshot_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(batch_id) DO UPDATE SET
                      status=excluded.status, finished_at=excluded.finished_at,
                      input_digest=excluded.input_digest, note=excluded.note,
-                     params_json=excluded.params_json""",
+                     params_json=excluded.params_json,
+                     snapshot_id=excluded.snapshot_id""",
                 (batch["batch_id"], batch["batch_key"], batch["run_id"], batch["dataset"],
                  batch["status"], batch["created_at"], batch.get("finished_at"),
                  batch["input_digest"],
                  json.dumps(batch.get("params", {}), ensure_ascii=False),
-                 batch.get("note", "")),
+                 batch.get("note", ""), batch.get("snapshot_id", "")),
             )
 
     def find_done_by_key(self, batch_key: str) -> dict | None:
@@ -166,12 +214,182 @@ class Store:
                 "SELECT * FROM batches ORDER BY created_at DESC, rowid DESC LIMIT 1").fetchone()
         return dict(row) if row else None
 
+    def current_batch(self) -> dict | None:
+        """当前报告批次：优先取报告版本表标记 current 的已发布批次；
+        没有版本记录的老数据回退到最新批次。这样补录生成待核版本时，
+        页面与导出默认仍展示旧版（当前报告），核对通过切换后才展示新版。"""
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT b.* FROM batches b
+                   JOIN report_versions v ON v.batch_id = b.batch_id
+                   WHERE v.is_current = 1 AND v.state = 'published'
+                   ORDER BY b.created_at DESC, b.rowid DESC LIMIT 1""").fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT * FROM batches ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                ).fetchone()
+        return dict(row) if row else None
+
     def list_batches(self, limit: int = 30) -> list[dict]:
         with self.connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM batches ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+    # ---------- 促销单快照 ----------
+    def upsert_promo_snapshot(self, snapshot: dict, created_at: str) -> str:
+        """按摘要幂等写入快照，返回 snapshot_id（同一促销单重试不新增）。"""
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO promo_snapshots (snapshot_id, snapshot_digest, source_name,
+                        source_sha256, row_count, created_at, content_json)
+                   VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(snapshot_digest) DO UPDATE SET
+                     source_sha256=excluded.source_sha256,
+                     row_count=excluded.row_count""",
+                (snapshot["snapshot_digest"], snapshot["snapshot_digest"],
+                 snapshot["source_name"], snapshot["source_sha256"],
+                 snapshot["row_count"], created_at, snapshot["content_json"]))
+        return snapshot["snapshot_digest"]
+
+    def get_promo_snapshot(self, snapshot_id: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM promo_snapshots WHERE snapshot_id=?",
+                (snapshot_id,)).fetchone()
+        return dict(row) if row else None
+
+    # ---------- 报告版本 ----------
+    def get_version_by_idem(self, idem_key: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM report_versions WHERE idem_key=?",
+                (idem_key,)).fetchone()
+        return dict(row) if row else None
+
+    def get_version_by_batch(self, batch_id: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM report_versions WHERE batch_id=?",
+                (batch_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_version(self, version_id: int) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM report_versions WHERE version_id=?",
+                (version_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_versions(self, series_key: str | None = None) -> list[dict]:
+        with self.connect() as conn:
+            if series_key is None:
+                rows = conn.execute(
+                    "SELECT * FROM report_versions ORDER BY created_at DESC, version_id DESC"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM report_versions WHERE series_key=? "
+                    "ORDER BY version_no DESC", (series_key,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_series(self) -> list[dict]:
+        """每个业务口径一行：当前版本号、最新版本状态与绑定的快照。"""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT series_key,
+                          MAX(version_no) AS latest_version_no,
+                          SUM(CASE WHEN is_current=1 THEN 1 ELSE 0 END) AS has_current,
+                          SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending_count,
+                          SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_count,
+                          MAX(updated_at) AS updated_at
+                   FROM report_versions GROUP BY series_key
+                   ORDER BY updated_at DESC""").fetchall()
+        return [dict(r) for r in rows]
+
+    def next_version_no(self, conn, series_key: str) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version_no), 0) AS m FROM report_versions "
+            "WHERE series_key=?", (series_key,)).fetchone()
+        return int(row["m"]) + 1
+
+    def insert_report_version(self, version: dict) -> int:
+        with self.connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO report_versions (series_key, version_no, batch_id,
+                        snapshot_id, idem_key, state, is_current, change_note,
+                        attempts, error_note, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (version["series_key"], version["version_no"], version["batch_id"],
+                 version["snapshot_id"], version["idem_key"], version["state"],
+                 int(version.get("is_current", 0)), version.get("change_note", ""),
+                 int(version.get("attempts", 1)), version.get("error_note", ""),
+                 version["created_at"], version["updated_at"]))
+            return int(cur.lastrowid)
+
+    def mark_version_state(self, version_id: int, state: str, *,
+                           is_current: int | None = None, error_note: str | None = None,
+                           bump_attempts: bool = False, updated_at: str = "") -> None:
+        sets = ["state=?", "updated_at=?"]
+        args: list = [state, updated_at]
+        if is_current is not None:
+            sets.append("is_current=?")
+            args.append(int(is_current))
+        if error_note is not None:
+            sets.append("error_note=?")
+            args.append(error_note)
+        if bump_attempts:
+            sets.append("attempts=attempts+1")
+        args.append(version_id)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE report_versions SET {', '.join(sets)} WHERE version_id=?",
+                args)
+
+    def publish_version(self, version_id: int, updated_at: str) -> dict:
+        """核对通过：原子切换当前报告。旧 current 置 0 并归档，目标版本发布。
+        任何一步失败整体回滚，保证同一时刻至多一个 current。
+
+        版本必须按号顺序发布：同系列里若已存在更新的待核/已发布版本，
+        拒绝把旧版本切成当前报告，避免旧报告反向覆盖更新的结论。
+        """
+        with self.connect() as conn:
+            target = conn.execute(
+                "SELECT * FROM report_versions WHERE version_id=?",
+                (version_id,)).fetchone()
+            if target is None:
+                raise LookupError(version_id)
+            if target["state"] != "pending":
+                raise RuntimeError(f"版本状态为 {target['state']}，不能切换为当前报告")
+            newer = conn.execute(
+                "SELECT COUNT(*) AS c FROM report_versions "
+                "WHERE series_key=? AND version_no>? AND state IN ('pending','published')",
+                (target["series_key"], target["version_no"])).fetchone()
+            if newer["c"] > 0:
+                raise RuntimeError(
+                    f"存在更新的报告版本（v{target['version_no']} 之后仍有待核/当前版本），"
+                    "请按版本号顺序核对，不能用旧版覆盖新版")
+            conn.execute(
+                "UPDATE report_versions SET is_current=0, state='archived', updated_at=? "
+                "WHERE series_key=? AND is_current=1",
+                (updated_at, target["series_key"]))
+            conn.execute(
+                "UPDATE report_versions SET is_current=1, state='published', "
+                "error_note='', updated_at=? WHERE version_id=?",
+                (updated_at, version_id))
+            row = conn.execute(
+                "SELECT * FROM report_versions WHERE version_id=?",
+                (version_id,)).fetchone()
+            return dict(row)
+
+    def current_version_of_series(self, series_key: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM report_versions WHERE series_key=? AND is_current=1",
+                (series_key,)).fetchone()
+        return dict(row) if row else None
+
 
     def clear_batch_rows(self, batch_id: str, conn) -> None:
         for table in BATCH_TABLES:

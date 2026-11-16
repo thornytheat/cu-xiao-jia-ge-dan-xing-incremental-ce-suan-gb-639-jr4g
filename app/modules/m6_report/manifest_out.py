@@ -31,6 +31,13 @@ def to_csv(doc: dict) -> str:
                 "zero_mode", "input_digest", "started_at", "finished_at",
                 "elapsed_ms", "timezone", "decimals"):
         writer.writerow((key, doc.get(key, "")))
+    snapshot = doc.get("promo_snapshot") or {}
+    if snapshot:
+        writer.writerow(("promo_snapshot_id", snapshot.get("snapshot_id", "")))
+        writer.writerow(("promo_snapshot_digest", snapshot.get("snapshot_digest", "")))
+        writer.writerow(("promo_source",
+                         f"{snapshot.get('source_name', '')} "
+                         f"({snapshot.get('row_count', 0)} 行)"))
     for item in doc.get("inputs", []):
         writer.writerow((f"input:{item['name']}",
                          f"{item['sha256']} ({item['bytes']} B, {item['encoding']})"))

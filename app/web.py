@@ -29,6 +29,13 @@ NAV = (
 STATUS_LABELS = {
     "done": "完成", "failed": "失败", "running": "运行中", "ready": "就绪",
 }
+VERSION_STATE_LABELS = {
+    "running": "生成中",
+    "pending": "待核对",
+    "published": "当前报告",
+    "archived": "历史版本",
+    "failed": "生成失败",
+}
 ROLE_LABELS = {"sales": "日销", "promo": "促销日历", "control": "对照组"}
 
 
@@ -40,7 +47,9 @@ class Ctx:
     def current_batch(self, batch_id: str | None = None) -> dict | None:
         if batch_id:
             return self.store.get_batch(batch_id)
-        return self.store.latest_batch()
+        # 默认展示「当前报告」：补录生成待核版本期间，当前报告仍是旧版，
+        # 核对通过切换后才指向新版；显式带 batch_id 可查看任意历史版本。
+        return self.store.current_batch()
 
 
 def get_ctx(request: Request) -> Ctx:
@@ -58,6 +67,7 @@ def setup(app) -> None:
     env.filters["level"] = lambda s: reasons.LEVEL_LABELS.get(s, s or "—")
     env.filters["sev"] = lambda s: reasons.LEVEL_LABELS.get(s, s or "—")
     env.filters["status"] = lambda s: STATUS_LABELS.get(s, s or "—")
+    env.filters["vstate"] = lambda s: VERSION_STATE_LABELS.get(s, s or "—")
     env.filters["shortdt"] = lambda s: (s or "").replace("T", " ")[:19]
     env.globals.update(
         nav=NAV,
